@@ -1,2 +1,2 @@
-# developersIO-article
-developersI/O用の記事
+# 目的
+本リポジトリはDevelopersI/Oに投稿する記事内容用である  
