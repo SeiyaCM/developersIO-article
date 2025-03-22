@@ -1,0 +1,10 @@
+{
+  "ABC": {
+      "name": "alice",
+      "privateNumber": "Abki56UIOO"
+  },
+  "DEF": {
+      "name": "bob",
+      "privateNumber": "Abki56UIOO"
+  }
+}
