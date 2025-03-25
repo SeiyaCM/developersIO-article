@@ -1,38 +1,36 @@
 import * as AWS from 'aws-sdk';
 
-const s3 = new AWS.S3();
+const ddb = new AWS.DynamoDB.DocumentClient();
 
 export const handler = async (event: any) => {
-    console.info('event', event);
-    const bucketName = process.env.BUCKET_NAME;
-    const key = process.env.KEY;
+    console.info('event:', event);
+    const tableName = process.env.TABLE_NAME;
+    const userId = event.userId;
 
     try {
-        const params = {
-            Bucket: bucketName,
-            Key: key
-        };
-
-        const data = await s3.getObject(params).promise();
-        const jsonData = JSON.parse(data.Body.toString('utf-8'));
-
-        // Mask the privateNumber
-        for (const key in jsonData) {
-            if (jsonData[key].privateNumber) {
-                jsonData[key].privateNumber = jsonData[key].privateNumber.replace(/./g, '*');
-            }
+        if (!tableName || !userId) {
+            throw new Error('Invalid parameters');
         }
 
-        const res = JSON.stringify(jsonData);
+        const data = await getUserInfo(ddb, tableName, userId);
+        console.info('Get Data:', data);
+        return data;
+    } catch (error) {
+        console.error('Error:', error);
+        throw error;
+    }
+};
 
-        await s3.writeGetObjectResponse({
-            RequestRoute: event.getObjectContext.outputRoute,
-            RequestToken: event.getObjectContext.outputToken,
-            Body: res,
-            ContentType: 'application/json'
-        }).promise()
+const getUserInfo = async (client: AWS.DynamoDB.DocumentClient, tableName: string, userId: string) => {
+    try {
+        const params = {
+            TableName: tableName,
+            Key: { userId },
+            ProjectionExpression: 'userId, wins'
+        };
 
-        return { statusCode: 200, body: res};
+        const data = await client.get(params).promise();
+        return data.Item;
     } catch (error) {
         console.error('Error:', error);
         throw error;
