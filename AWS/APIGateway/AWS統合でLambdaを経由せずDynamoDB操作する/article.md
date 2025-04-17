@@ -1,3 +1,14 @@
+# 概要
+こんにちは、クラスメソッド製造ビジネステクノロジー部の田中聖也です  
+意外と知られていないですが、[AWS統合](https://docs.aws.amazon.com/ja_jp/apigateway/latest/developerguide/api-gateway-api-integration-types.html)を使用することでAPIGatewayからDynamoDBやS3を直接操作出来ることはご存知でしょうか?  
+今回はAPIGatewayからLmabdaを経由せず、直接DynamoDBに対してCRUD操作を実施したいと思います  
+![](./images/アーキテクチャ.png)  
+
+# やってみた
+## CDK
+本来は統合レスポンスを定義する必要がありますが、今回ここは省略します  
+とりあえず、APIGatewayからDynamoDBが操作出来るのを目標とします  
+```typescript:stack.ts
 import * as cdk from 'aws-cdk-lib';
 import { Construct } from 'constructs'
 import { 
@@ -217,3 +228,26 @@ export class AttemptStackStack extends cdk.Stack {
     );
   }
 }
+
+```
+
+## ユーザー作成
+作成されたAPIGatewayからユーザーを作成してみます  
+![](./images/Post_request.png)  
+  
+なんか、リクエストが通っていそうですね  
+![](./images/Post_response.png)  
+  
+実際にDynamoDBを確認すると指定したパラメーターでユーザーが作成されているのが分かります  
+![](./images/Post_result.png)  
+
+## ユーザー取得
+![](./images/Get_response.png)  
+## ユーザー更新
+![](./images/Put_request.png)
+## ユーザー削除
+![](./images/Delete_response.png)  
+
+# まとめ
+APIGatewayから直接DynamoDBに対してCRUD操作が出来ることを確認しました  
+単体操作だけでなく[TransactWriteItems](https://docs.aws.amazon.com/ja_jp/amazondynamodb/latest/APIReference/API_TransactWriteItems.html)なども利用出来るので、色んな場面で使用できそうですね  
