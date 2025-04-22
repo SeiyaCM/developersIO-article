@@ -1,3 +1,22 @@
+# 概要
+こんにちは、クラスメソッド製造ビジネステクノロジー部の田中聖也です  
+REST APIでPostメソッドやPutメソッドを使用すると必ず一緒にしなければならないのが、bodyパラメータのバリデーションです  
+バリデーションの方法としてlambdaで実施することも出来ますが、バリデーション内容が複雑だとテストケースも増えてきます  
+そこで、できることはAPIGatewayのデータモデルを定義してバリデーションをしてあげようと思います  
+![](./images/構成図.png)  
+
+# やってみた
+## バリデーション内容
+今回はユーザーを作成するAPIで考えます  
+パラメータ情報およびバリデーション内容は以下のものとします  
+| 項目 | データ型 | 制約 | 必須項目 |
+| :-- | :-- | :-- | :-- |
+| userId | string | 16文字 | 〇 |
+| name | string | 1文字以上20文字未満 | 〇 |
+| age | number | 15以上100未満 | 〇 |
+| phoneNumber | string | 0始まりの11桁以上14桁未満 | × |
+## CDK
+```typescript:stack.ts
 import * as cdk from 'aws-cdk-lib';
 import { Construct } from 'constructs'
 import { 
@@ -91,3 +110,89 @@ export class AttemptStackStack extends cdk.Stack {
     );
   }
 }
+```
+## 検証
+### 全てOKの場合
+#### リクエスト内容
+```json:request.json
+{
+    "userId": "AAAABBBBCCCCDDDD",
+    "name": "tom",
+    "age": 20,
+    "phoneNumber": "012345678901"
+}
+```
+#### レスポンス
+![](./images/成功例.png)
+
+
+### userIdが不正な値
+#### リクエスト内容
+```json:request.json
+{
+    "userId": "ABCD",
+    "name": "tom",
+    "age": 20,
+    "phoneNumber": "012345678901"
+}
+```
+#### レスポンス
+![](./images/userId不正.png)
+
+### nameが不正な値
+#### リクエスト内容
+```json:request.json
+{
+    "userId": "AAAABBBBCCCCDDDD",
+    "name": "",
+    "age": 20,
+    "phoneNumber": "012345678901"
+}
+```
+#### レスポンス
+![](./images/name不正.png)
+
+### ageが不正な値
+#### リクエスト内容
+```json:request.json
+{
+    "userId": "AAAABBBBCCCCDDDD",
+    "name": "tom",
+    "age": 1500,
+    "phoneNumber": "012345678901"
+}
+```
+#### レスポンス
+![](./images/age不正.png)
+
+### phoneNumberが不正な値
+#### リクエスト内容
+```json:request.json
+{
+    "userId": "AAAABBBBCCCCDDDD",
+    "name": "tom",
+    "age": 20,
+    "phoneNumber": "0123"
+}
+```
+#### レスポンス
+![](./images/phoneNumber不正.png)
+
+### ageとphoneNumberが不正な値
+#### リクエスト内容
+```json:request.json
+{
+    "userId": "AAAABBBBCCCCDDDD",
+    "name": "tom",
+    "age": 1500,
+    "phoneNumber": "0123"
+}
+```
+#### レスポンス
+ageとphoneNumberの両方が不正な値であることが確認できますね  
+ちょっと前まで1つしか表示されない記憶があったのですが、アップデートされたのかな。。。  
+![](./images/ageとphoneNumber不正.png)
+
+# まとめ
+APIGatewayで入力値をバリデーションできることを確認できました  
+難しい部分はlambdaで実行する必要がありますが、簡単な内容であればAPIGatewayの機能を活用してローコード化していきたいですね  
