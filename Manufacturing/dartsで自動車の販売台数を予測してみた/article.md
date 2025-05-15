@@ -40,12 +40,10 @@ series.plot()
 予測モデルは以下3つのモデルを使用します  
 - ARIMA
 - ExponentialSmoothing
-- BATS
 ### ソースコード
 ```pred.py:python
 from darts.models import ( ARIMA,
-                          ExponentialSmoothing,
-                          BATS
+                          ExponentialSmoothing
                           )
 
 # 学習データと予測データの分割
