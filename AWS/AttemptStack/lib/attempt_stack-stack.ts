@@ -61,6 +61,19 @@ export class AttemptStackStack extends cdk.Stack {
       }
     });
 
+    const createUserResponseModel = api.addModel(`${PREFIX}-CreateUserResponseModel`, {
+      contentType: 'application/json',
+      modelName: 'CreateUserResponseModel',
+      schema: {
+        title: 'CreateUserResponseModel',
+        type: aws_apigateway.JsonSchemaType.OBJECT,
+        properties: {
+          userId: {type: aws_apigateway.JsonSchemaType.STRING}
+        },
+        required: ['userId']
+      }
+    })
+
     const handler = new aws_lambda_nodejs.NodejsFunction(this,  `${PREFIX}-Handler`, {
       functionName: `${PREFIX}-Handler`,
       runtime: aws_lambda.Runtime.NODEJS_20_X,
@@ -85,7 +98,48 @@ export class AttemptStackStack extends cdk.Stack {
         },
         requestValidator: createUserValidator, // 設定したリクエストバリデーションを紐づけ
         methodResponses: [
-          {statusCode: '201'}
+          {statusCode: '201', responseModels: {'application/json': createUserResponseModel}} // 設定したレスポンスモデルを紐づけ
+        ]
+      }
+    );
+
+    // Note: ユーザー情報取得
+    const getUserIntegration = new aws_apigateway.AwsIntegration({
+      region: this.region,
+      service: 'dynamodb',
+      action: 'GetItem',
+      integrationHttpMethod: 'POST',
+      options: {
+        credentialsRole: apiGatewayExecRole,
+        requestTemplates: {
+          'application/json': `{
+            "TableName": "${userTable.tableName}",
+            "Key": {
+              "userId": {
+                "S": "$input.params('userId')"
+              }
+            }
+          }`
+        },
+        integrationResponses: [
+          {
+            statusCode: '200',
+            responseTemplates: {
+              'application/json': `{
+                "name": "$input.path('$').Item.name.S",
+                "age": "$input.path('$').Item.age.N"
+              }`
+            }
+          }
+        ]
+      }
+    });
+    
+    const userIdResource = usersResource.addResource('{userId}');
+    userIdResource.addMethod('GET', getUserIntegration, 
+      {
+        methodResponses: [
+          {statusCode: '200'}
         ]
       }
     );
