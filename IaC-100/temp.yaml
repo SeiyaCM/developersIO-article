@@ -1,0 +1,381 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'DynamoDBデータをAthena経由でQuickSightで可視化するためのインフラストラクチャ'
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: 'iot-analytics'
+    Description: 'プロジェクト名（リソースの命名に使用）'
+
+Resources:
+  # S3バケット（DynamoDBデータの保存用）
+  DataLakeS3Bucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub '${ProjectName}-data-lake-${AWS::AccountId}'
+      VersioningConfiguration:
+        Status: Enabled
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      NotificationConfiguration:
+        LambdaConfigurations:
+          - Event: s3:ObjectCreated:*
+            Function: !GetAtt GlueCrawlerTriggerFunction.Arn
+            Filter:
+              S3Key:
+                Rules:
+                  - Name: prefix
+                    Value: 'dynamodb-exports/'
+
+  # Athenaクエリ結果格納用S3バケット
+  AthenaResultsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub '${ProjectName}-athena-results-${AWS::AccountId}'
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+
+  # DynamoDBテーブル
+  IoTDataTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub '${ProjectName}-iot-data'
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: 'ID'
+          AttributeType: 'S'
+        - AttributeName: 'デバイスID'
+          AttributeType: 'S'
+      KeySchema:
+        - AttributeName: 'ID'
+          KeyType: 'HASH'
+        - AttributeName: 'デバイスID'
+          KeyType: 'RANGE'
+      StreamSpecification:
+        StreamViewType: NEW_AND_OLD_IMAGES
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      ExportConfiguration:
+        Enabled: true
+
+  # IAMロール（DynamoDB Export用）
+  DynamoDBExportRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${ProjectName}-dynamodb-export-role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: dynamodb.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: S3WritePolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:PutObject
+                  - s3:PutObjectAcl
+                Resource: !Sub '${DataLakeS3Bucket}/*'
+
+  # AWS Glue Database
+  GlueDatabase:
+    Type: AWS::Glue::Database
+    Properties:
+      CatalogId: !Ref AWS::AccountId
+      DatabaseInput:
+        Name: !Sub '${ProjectName}_database'
+        Description: 'IoTデータ分析用データベース'
+
+  # AWS Glue Crawler用IAMロール
+  GlueCrawlerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${ProjectName}-glue-crawler-role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: glue.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSGlueServiceRole
+      Policies:
+        - PolicyName: S3AccessPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:ListBucket
+                Resource:
+                  - !Sub '${DataLakeS3Bucket}'
+                  - !Sub '${DataLakeS3Bucket}/*'
+
+  # AWS Glue Crawler
+  GlueCrawler:
+    Type: AWS::Glue::Crawler
+    Properties:
+      Name: !Sub '${ProjectName}-crawler'
+      Role: !GetAtt GlueCrawlerRole.Arn
+      DatabaseName: !Ref GlueDatabase
+      Targets:
+        S3Targets:
+          - Path: !Sub 's3://${DataLakeS3Bucket}/dynamodb-exports/'
+      SchemaChangePolicy:
+        UpdateBehavior: UPDATE_IN_DATABASE
+        DeleteBehavior: LOG
+
+  # Lambda関数用IAMロール（Glue Crawler起動用）
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${ProjectName}-lambda-execution-role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: GlueCrawlerPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - glue:StartCrawler
+                  - glue:GetCrawler
+                Resource: !Sub 'arn:aws:glue:${AWS::Region}:${AWS::AccountId}:crawler/${ProjectName}-crawler'
+
+  # Lambda関数（S3へのファイル追加時にGlue Crawlerを起動）
+  GlueCrawlerTriggerFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub '${ProjectName}-glue-crawler-trigger'
+      Runtime: python3.9
+      Handler: index.lambda_handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Code:
+        ZipFile: |
+          import boto3
+          import json
+          import logging
+
+          logger = logging.getLogger()
+          logger.setLevel(logging.INFO)
+
+          def lambda_handler(event, context):
+              glue_client = boto3.client('glue')
+              
+              # 環境変数からcrawler名を取得
+              crawler_name = os.environ['CRAWLER_NAME']
+              
+              try:
+                  # Crawlerの状態を確認
+                  response = glue_client.get_crawler(Name=crawler_name)
+                  state = response['Crawler']['State']
+                  
+                  if state == 'READY':
+                      # Crawlerを開始
+                      glue_client.start_crawler(Name=crawler_name)
+                      logger.info(f'Started crawler: {crawler_name}')
+                  else:
+                      logger.info(f'Crawler {crawler_name} is in state: {state}')
+                      
+              except Exception as e:
+                  logger.error(f'Error starting crawler: {str(e)}')
+                  raise e
+              
+              return {
+                  'statusCode': 200,
+                  'body': json.dumps('Success')
+              }
+      Environment:
+        Variables:
+          CRAWLER_NAME: !Ref GlueCrawler
+      Timeout: 60
+
+  # Lambda関数のS3呼び出し許可
+  LambdaInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref GlueCrawlerTriggerFunction
+      Action: lambda:InvokeFunction
+      Principal: s3.amazonaws.com
+      SourceAccount: !Ref AWS::AccountId
+      SourceArn: !Sub '${DataLakeS3Bucket}/*'
+
+  # Athena Workgroup
+  AthenaWorkGroup:
+    Type: AWS::Athena::WorkGroup
+    Properties:
+      Name: !Sub '${ProjectName}-workgroup'
+      Description: 'IoTデータ分析用Athena Workgroup'
+      State: ENABLED
+      WorkGroupConfiguration:
+        ResultConfiguration:
+          OutputLocation: !Sub 's3://${AthenaResultsBucket}/'
+        EnforceWorkGroupConfiguration: true
+        PublishCloudWatchMetrics: true
+
+  # EventBridge Rule（定期的なDynamoDB Export用）
+  DynamoDBExportScheduleRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub '${ProjectName}-export-schedule'
+      Description: 'DynamoDBの定期エクスポートをスケジュール'
+      ScheduleExpression: 'rate(1 day)'  # 毎日実行
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt DynamoDBExportLambda.Arn
+          Id: 'DynamoDBExportTarget'
+
+  # DynamoDB Export用Lambda関数
+  DynamoDBExportLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub '${ProjectName}-dynamodb-export'
+      Runtime: python3.9
+      Handler: index.lambda_handler
+      Role: !GetAtt DynamoDBExportLambdaRole.Arn
+      Timeout: 300
+      Code:
+        ZipFile: |
+          import boto3
+          import json
+          import datetime
+          import os
+
+          def lambda_handler(event, context):
+              dynamodb = boto3.client('dynamodb')
+              
+              table_name = os.environ['TABLE_NAME']
+              s3_bucket = os.environ['S3_BUCKET']
+              
+              # エクスポート先のS3パスを生成
+              now = datetime.datetime.now()
+              s3_prefix = f"dynamodb-exports/{now.strftime('%Y/%m/%d')}"
+              
+              try:
+                  response = dynamodb.export_table_to_point_in_time(
+                      TableArn=f"arn:aws:dynamodb:{os.environ['AWS_REGION']}:{os.environ['AWS_ACCOUNT_ID']}:table/{table_name}",
+                      S3Bucket=s3_bucket,
+                      S3Prefix=s3_prefix,
+                      ExportFormat='PARQUET'
+                  )
+                  
+                  print(f"Export started: {response['ExportDescription']['ExportArn']}")
+                  
+                  return {
+                      'statusCode': 200,
+                      'body': json.dumps({
+                          'message': 'Export started successfully',
+                          'exportArn': response['ExportDescription']['ExportArn']
+                      })
+                  }
+                  
+              except Exception as e:
+                  print(f"Error: {str(e)}")
+                  return {
+                      'statusCode': 500,
+                      'body': json.dumps({
+                          'error': str(e)
+                      })
+                  }
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref IoTDataTable
+          S3_BUCKET: !Ref DataLakeS3Bucket
+          AWS_ACCOUNT_ID: !Ref AWS::AccountId
+
+  # DynamoDB Export Lambda用IAMロール
+  DynamoDBExportLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${ProjectName}-dynamodb-export-lambda-role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: DynamoDBExportPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:ExportTableToPointInTime
+                  - dynamodb:DescribeTable
+                Resource: !GetAtt IoTDataTable.Arn
+              - Effect: Allow
+                Action:
+                  - s3:PutObject
+                  - s3:PutObjectAcl
+                  - s3:GetBucketLocation
+                Resource:
+                  - !Sub '${DataLakeS3Bucket}'
+                  - !Sub '${DataLakeS3Bucket}/*'
+
+  # Lambda関数のEventBridge呼び出し許可
+  LambdaEventBridgePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref DynamoDBExportLambda
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt DynamoDBExportScheduleRule.Arn
+
+Outputs:
+  DynamoDBTableName:
+    Description: 'DynamoDBテーブル名'
+    Value: !Ref IoTDataTable
+    Export:
+      Name: !Sub '${AWS::StackName}-DynamoDBTableName'
+
+  S3BucketName:
+    Description: 'データレイク用S3バケット名'
+    Value: !Ref DataLakeS3Bucket
+    Export:
+      Name: !Sub '${AWS::StackName}-S3BucketName'
+
+  GlueDatabaseName:
+    Description: 'Glueデータベース名'
+    Value: !Ref GlueDatabase
+    Export:
+      Name: !Sub '${AWS::StackName}-GlueDatabaseName'
+
+  AthenaWorkGroupName:
+    Description: 'Athena Workgroup名'
+    Value: !Ref AthenaWorkGroup
+    Export:
+      Name: !Sub '${AWS::StackName}-AthenaWorkGroupName'
+
+  QuickSightDataSourceInfo:
+    Description: 'QuickSight用データソース情報'
+    Value: !Sub |
+      Athenaデータソース設定:
+      - データベース: ${GlueDatabase}
+      - Workgroup: ${AthenaWorkGroup}
+      - テーブル: クローラー実行後に作成されます
+    Export:
+      Name: !Sub '${AWS::StackName}-QuickSightInfo'
